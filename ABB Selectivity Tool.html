@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ABB Selectivity Tool</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--card:#f4f5f7;--line:#d9dce1;--acc:#d6001c;--ok:#16794a;--bad:#b3261e;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15171a;--fg:#eceef1;--card:#202327;--line:#34383e;--ok:#4cc38a;--bad:#ff8a80}}
+:root[data-theme="dark"]{--bg:#15171a;--fg:#eceef1;--card:#202327;--line:#34383e;--ok:#4cc38a;--bad:#ff8a80}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;line-height:1.6}
+main{max-width:760px;margin:0 auto;padding:16px}
+h1{font-size:1.3rem;margin:.2em 0}h2{font-size:1rem;margin:0 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}
+button,label.btn{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:.95rem;cursor:pointer;display:inline-block}
+button:disabled{opacity:.4;cursor:default}
+input[type=file]{display:none}
+.muted{color:var(--fg);opacity:.65;font-size:.88rem}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:start;white-space:nowrap}
+.tag{display:inline-block;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:0 6px;margin:1px;direction:ltr}
+</style>
+</head>
+<body>
+<main>
+<h1>أداة جداول السلكتيفتي – ABB</h1>
+
+<div class="card">
+<h2>1) قاعدة البيانات (جداول السلكتيفتي)</h2>
+<p class="muted">ارفع ملفات PDF بأسماء مثل <span class="tag">XT7 VS XT2.pdf</span> أو <span class="tag">XT4 &amp; XT2.pdf</span>. <b id="mode"></b></p>
+<label class="btn" id="dbLbl">رفع ملفات القاعدة<input id="dbIn" type="file" accept="application/pdf" multiple></label>
+<button id="dbClear" style="background:transparent;color:var(--bad);border:1px solid var(--line)">مسح القاعدة</button>
+<div id="dbInfo" class="muted" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+<h2>2) ملف التكنيكال أوفر</h2>
+<label class="btn">رفع ملف اللوحات<input id="mainIn" type="file" accept="application/pdf"></label>
+<span id="mainName" class="muted"></span>
+<div style="margin-top:10px"><button id="go" disabled>تحليل ودمج</button></div>
+<div id="status" class="muted" style="margin-top:8px"></div>
+</div>
+
+<div class="card" id="resCard" hidden>
+<h2>النتيجة</h2>
+<div class="wrap"><table><thead><tr><th>صفحة</th><th>Incoming</th><th>Outgoing</th><th>الجداول المضافة</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div id="missing" class="bad" style="margin-top:8px"></div>
+<div style="margin-top:10px"><button id="dl">تحميل الملف الجديد</button></div>
+</div>
+</main>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+const $=id=>document.getElementById(id);
+const DB={}; // key -> Uint8Array
+let mainBytes=null,outBytes=null,outName="selectivity.pdf";
+
+// ---------- storage (IndexedDB, guarded) ----------
+function idb(){return new Promise((res,rej)=>{try{const r=indexedDB.open("abbsel",1);r.onupgradeneeded=()=>r.result.createObjectStore("f");r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)}catch(e){rej(e)}})}
+async function idbPut(k,v){try{const d=await idb();d.transaction("f","readwrite").objectStore("f").put(v,k)}catch(e){}}
+async function idbAll(){try{const d=await idb();return await new Promise(res=>{const o={},q=d.transaction("f").objectStore("f").openCursor();q.onsuccess=()=>{const c=q.result;if(c){o[c.key]=c.value;c.continue()}else res(o)};q.onerror=()=>res({})})}catch(e){return{}}}
+async function idbClear(){try{const d=await idb();d.transaction("f","readwrite").objectStore("f").clear()}catch(e){}}
+
+// ---------- helpers ----------
+const norm=n=>n.replace(/\.pdf$/i,"").toUpperCase().replace(/&/g," VS ").replace(/\s+/g," ").replace(/\s*VS\s*/g," VS ").trim();
+function dbInfo(){const k=Object.keys(DB);$("dbInfo").innerHTML=k.length?`<span class="ok">${k.length} جدول محفوظ</span><br>`+k.sort().map(x=>`<span class="tag">${x}</span>`).join(""):"القاعدة فاضية.";}
+const MODEL=/\b(XT[1-7]|E[1-6]\.2|S200M|S300P|S800[CNSP]|S200)[A-Z]?\b/gi;
+function models(t){t=t.split("\n").filter(l=>!/accessor/i.test(l)).join(" ");const s=[];for(const m of t.matchAll(MODEL)){const b=m[1].toUpperCase();if(!s.includes(b))s.push(b)}return s}
+
+async function pageTexts(bytes){
+  const pdf=await pdfjsLib.getDocument({data:bytes.slice()}).promise,out=[];
+  for(let i=1;i<=pdf.numPages;i++){const p=await pdf.getPage(i),c=await p.getTextContent();out.push(c.items.map(x=>x.str+(x.hasEOL?"\n":" ")).join(""))}
+  return out;
+}
+// split a page's text into Incoming / Outgoing sections by label
+function analyse(text,mode){
+  const labs=[...text.matchAll(/incoming|outgoing/gi)],inc=[],out=[];
+  const put=(m,seg)=>(m==="incoming"?inc:out).push(...models(seg));
+  if(mode)put(mode,text.slice(0,labs.length?labs[0].index:undefined));
+  labs.forEach((l,i)=>put(l[0].toLowerCase(),text.slice(l.index+l[0].length,i+1<labs.length?labs[i+1].index:undefined)));
+  return{inc,out,mode:labs.length?labs[labs.length-1][0].toLowerCase():mode};
+}
+
+// ---------- events ----------
+let SH=null,AS=null;
+async function loadShared(){const s=await SH.collection("tables").get();for(const k in DB)delete DB[k];s.docs.forEach(d=>{const x=d.data();if(x&&x.key)DB[x.key]={id:x.assetId}});dbInfo()}
+async function getBytes(k){const v=DB[k];if(v instanceof Uint8Array)return v;const r=await fetch("/_blob/"+v.id);if(!r.ok)throw new Error("تعذر تحميل "+k);return DB[k]=new Uint8Array(await r.arrayBuffer())}
+$("dbIn").onchange=async e=>{
+  for(const f of e.target.files){const k=norm(f.name),b=new Uint8Array(await f.arrayBuffer());
+    if(SH&&AS){try{const r=await AS.upload(new Blob([b],{type:"application/pdf"}));await SH.collection("tables").doc(k.replace(/[^A-Z0-9.]+/g,"_")).set({key:k,assetId:r.id});DB[k]={id:r.id}}catch(err){$("dbInfo").textContent="تعذر الرفع: "+(err.message||err);continue}}
+    else{DB[k]=b;await idbPut(k,b)}}
+  dbInfo();e.target.value="";
+};
+$("dbClear").onclick=async()=>{for(const k in DB)delete DB[k];await idbClear();dbInfo()};
+$("mainIn").onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  mainBytes=new Uint8Array(await f.arrayBuffer());outName=f.name.replace(/\.pdf$/i,"")+" - with selectivity.pdf";
+  $("mainName").textContent=f.name;$("go").disabled=false;
+};
+
+$("go").onclick=async()=>{
+  $("go").disabled=true;$("status").textContent="جاري التحليل…";$("resCard").hidden=true;
+  try{
+    const texts=await pageTexts(mainBytes);
+    const src=await PDFLib.PDFDocument.load(mainBytes);
+    const out=await PDFLib.PDFDocument.create();
+    const cache={},rows=[],miss=new Set();
+    // group pages into Items: a new Item starts at any page containing "Incoming"; other pages continue the previous Item
+    const groups=[];
+    const startRe=texts.some(t=>/item\s*number/i.test(t))?/item\s*number/i:/incoming/i;
+    texts.forEach((t,i)=>{if(startRe.test(t)||!groups.length)groups.push([]);groups[groups.length-1].push(i)});
+    let n=0;
+    for(const g of groups){
+      const ps0=await out.copyPages(src,g);ps0.forEach(p=>out.addPage(p));
+      const inc=[],outs=[],added=[];
+      let mode=null;
+      g.forEach(i=>{const a=analyse(texts[i],mode);mode=a.mode;a.inc.forEach(x=>inc.includes(x)||inc.push(x));a.out.forEach(x=>outs.includes(x)||outs.push(x))});
+      for(const a of inc)for(const b of outs){
+        const k=`${a} VS ${b}`;
+        if(!DB[k]){miss.add(k);continue}
+        cache[k]=cache[k]||await PDFLib.PDFDocument.load(await getBytes(k));
+        const ps=await out.copyPages(cache[k],cache[k].getPageIndices());
+        ps.forEach(p=>out.addPage(p));added.push(k);
+      }
+      const rng=g.length>1?`${g[0]+1}–${g[g.length-1]+1}`:`${g[0]+1}`;
+      if(inc.length||outs.length)rows.push([rng,inc,outs,added]);
+      n+=g.length;$("status").textContent=`صفحة ${n} من ${texts.length}`;
+    }
+    outBytes=await out.save();
+    $("rows").innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1].map(x=>`<span class="tag">${x}</span>`).join("")||"—"}</td><td>${r[2].map(x=>`<span class="tag">${x}</span>`).join("")||"—"}</td><td>${r[3].map(x=>`<span class="tag">${x}</span>`).join("")||"—"}</td></tr>`).join("");
+    $("missing").textContent=miss.size?"جداول غير موجودة في القاعدة: "+[...miss].join(" ، "):"";
+    $("resCard").hidden=false;
+    $("status").innerHTML=rows.length?'<span class="ok">تم.</span>':'<span class="bad">ما لقيتش كلمات Incoming / Outgoing أو موديلات في الملف.</span>';
+  }catch(err){$("status").innerHTML='<span class="bad">حصل خطأ: '+(err.message||err)+'</span>'}
+  $("go").disabled=false;
+};
+
+$("dl").onclick=async()=>{
+  if(!outBytes)return;
+  try{
+    const d=await claude.use("downloads");
+    if(!d){$("status").innerHTML='<span class="bad">التحميل غير متاح هنا.</span>';return}
+    await d.save({filename:outName,data:outBytes});
+  }catch(e){if(e&&e.code!=="declined")$("status").innerHTML='<span class="bad">تعذر التحميل: '+(e.message||e)+'</span>'}
+};
+
+(async()=>{
+  try{SH=await claude.use("db")}catch(e){SH=null}
+  if(SH){
+    try{AS=await claude.use("assets")}catch(e){AS=null}
+    try{await loadShared();$("mode").textContent="قاعدة مشتركة لكل الفريق"+(AS?" – عندك صلاحية الرفع.":" – الرفع للمسؤولين (Editors) فقط.")}catch(e){SH=null}
+  }
+  if(!SH){Object.assign(DB,await idbAll());$("mode").textContent="قاعدة محلية على جهازك فقط."}
+  if(SH&&!AS)$("dbLbl").hidden=true;
+  if(SH)$("dbClear").hidden=true;
+  dbInfo();
+})();
+</script>
+</body>
+</html>
